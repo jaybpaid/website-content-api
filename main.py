@@ -6,7 +6,7 @@ import os
 import json
 import hashlib
 import time
-from typing import Optional
+from typing import Optional, Union, List
 
 from exa_py import Exa
 from fastapi import FastAPI, HTTPException, Query
@@ -47,6 +47,15 @@ class ScrapeResponse(BaseModel):
 
 def get_cache_key(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
+
+
+def _convert_highlights(h) -> Optional[str]:
+    """Convert highlights from Exa API which can be list or string."""
+    if h is None:
+        return None
+    if isinstance(h, list):
+        return "\n".join(str(x) for x in h)
+    return str(h)
 
 
 async def scrape_with_exa(url: str, max_chars: int = 5000) -> dict:
@@ -117,11 +126,13 @@ async def scrape(req: ScrapeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
-    # Build response
+    # Build response - convert highlights from list if needed
+    highlights_val = _convert_highlights(data.get("highlights"))
+    
     result = ScrapeResponse(
         url=url_str,
         text=data.get("text", ""),
-        highlights=data.get("highlights"),
+        highlights=highlights_val,
         title=data.get("title"),
         metadata={"provider": "exa"},
     )
@@ -133,7 +144,7 @@ async def scrape(req: ScrapeRequest):
 
 
 @app.post("/scrape/chunks")
-async def scrape_chunks(req: ScrapeRequest, chunk_size: int = Query(1000, ge=100, le=10000)):
+async def scrape_chunks(req: ScrapeRequest, chunk_size: int = 1000):
     """Scrape website and return as chunks for LLM consumption."""
     # First get full scrape
     scrape_result = await scrape(req)
