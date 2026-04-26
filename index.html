@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Website Content API - LLM‑Ready Data</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 2rem; color: #333; }
+        h1 { color: #2563eb; }
+        .price { font-size: 1.5rem; font-weight: bold; color: #059669; }
+        .btn { display: inline-block; background: #2563eb; color: white; padding: 0.75rem 1.5rem; border-radius: 0.5rem; text-decoration: none; margin-top: 1rem; }
+        .btn:hover { background: #1d4ed8; }
+        code { background: #f3f4f6; padding: 0.2rem 0.4rem; border-radius: 0.25rem; }
+        pre { background: #1f2937; color: #e5e7eb; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>Website Content API</h1>
+    <p>Turn any URL into LLM‑ready content. Built on Apify's Website Content Crawler with adaptive scraping, schema.org extraction, and text chunking.</p>
+    
+    <h2>Pricing</h2>
+    <ul>
+        <li><strong>Free:</strong> 50 requests/month (demo)</li>
+        <li><strong>Starter:</strong> $9/month – 5,000 requests</li>
+        <li><strong>Pro:</strong> $29/month – 25,000 requests</li>
+        <li><strong>Enterprise:</strong> Custom – unlimited + SLA</li>
+    </ul>
+
+    <h2>Quick Start</h2>
+    <pre><code>curl -X POST https://api.example.com/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "chunk_size": 500}'</code></pre>
+
+    <a href="https://api.example.com/docs" class="btn">View Full Docs</a>
+</body>
+</html>
