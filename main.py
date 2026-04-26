@@ -1,6 +1,6 @@
 """
-FastAPI wrapper around Apify Website Content Crawler.
-Provides LLM‑ready chunks, schema.org extraction, and caching.
+FastAPI wrapper around Exa Search API for website content extraction.
+Provides LLM-ready chunks, highlights, and text content.
 """
 import os
 import json
@@ -8,7 +8,7 @@ import hashlib
 import time
 from typing import Optional
 
-import httpx
+from exa_py import Exa
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
 
@@ -16,29 +16,32 @@ from pydantic import BaseModel, HttpUrl
 from dotenv import load_dotenv
 load_dotenv()
 
-APIFY_TOKEN = os.getenv("APIFY_TOKEN")  # Must be set in environment
-ACTOR_ID = "apify~website-content-crawler"
-BASE_URL = "https://api.apify.com/v2"
+EXA_API_KEY = os.getenv("EXA_API_KEY")  # Must be set in environment
 
 app = FastAPI(
     title="Website Content API",
-    description="LLM‑ready content extraction API using Apify Website Content Crawler",
-    version="0.1.0",
+    description="LLM-ready content extraction API using Exa Search API",
+    version="0.2.0",
 )
 
-# Simple in‑memory cache (for production replace with Redis)
+# Initialize Exa client
+exa = Exa(EXA_API_KEY) if EXA_API_KEY else None
+
+# Simple in-memory cache (for production replace with Redis)
 cache = {}
 
 
 class ScrapeRequest(BaseModel):
     url: HttpUrl
-    extract_schema: Optional[bool] = False
-    chunk_size: Optional[int] = 1000  # characters per chunk
+    highlights: Optional[bool] = True
+    max_chars: Optional[int] = 5000  # max characters per result
 
 
 class ScrapeResponse(BaseModel):
     url: str
-    chunks: list[str]
+    text: str
+    highlights: Optional[str] = None
+    title: Optional[str] = None
     metadata: dict
 
 
@@ -46,31 +49,35 @@ def get_cache_key(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
 
-async def call_actor(url: str, extract_schema: bool) -> dict:
-    """Call Apify Website Content Crawler actor."""
-    payload = {
-        "startUrls": [{"url": url}],
-        "parser": {
-            "type": "markdown",
-            "maxTextLength": 0,  # no limit
-        },
-        "schemaOrg": extract_schema,
-    }
+async def scrape_with_exa(url: str, max_chars: int = 5000) -> dict:
+    """Scrape website content using Exa API."""
+    if not exa:
+        raise HTTPException(status_code=500, detail="EXA_API_KEY not configured")
     
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        # Use the sync endpoint that waits for completion
-        resp = await client.post(
-            f"{BASE_URL}/acts/{ACTOR_ID}/run-sync-get-dataset-items",
-            params={"token": APIFY_TOKEN},
-            json={"startUrls": [{"url": url}]},
-            headers={"Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        return resp.json()[0]  # Return first item
+    # Get full text content from URL
+    result = exa.get_contents(
+        [str(url)],
+        text=True,
+        summary=False,
+        highlights={"max_characters": max_chars} if max_chars else None,
+    )
+    
+    if not result or not result.results:
+        raise HTTPException(status_code=404, detail="No content found")
+    
+    item = result.results[0]
+    return {
+        "text": item.text or "",
+        "url": item.url,
+        "title": item.title,
+        "highlights": item.highlights,
+    }
 
 
 def chunk_text(text: str, size: int = 1000) -> list[str]:
     """Split text into chunks of approx size."""
+    if not text:
+        return []
     chunks = []
     start = 0
     while start < len(text):
@@ -82,7 +89,12 @@ def chunk_text(text: str, size: int = 1000) -> list[str]:
 
 @app.get("/")
 async def root():
-    return {"message": "Website Content API", "docs": "/docs"}
+    return {"message": "Website Content API", "version": "0.2.0", "docs": "/docs"}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "provider": "exa"}
 
 
 @app.post("/scrape", response_model=ScrapeResponse)
@@ -93,35 +105,49 @@ async def scrape(req: ScrapeRequest):
     cache_key = get_cache_key(url_str)
     if cache_key in cache:
         cached = cache[cache_key]
-        # Simple 1‑min TTL for demo
-        if time.time() - cached["ts"] < 60:
+        # Simple 5-min TTL
+        if time.time() - cached["ts"] < 300:
             return cached["data"]
     
-    # Call Apify actor
+    # Call Exa API
     try:
-        data = await call_actor(url_str, req.extract_schema)
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+        data = await scrape_with_exa(url_str, req.max_chars)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     
-    # Extract text and metadata
-    text = data.get("text", "")
-    metadata = {
-        "title": data.get("metadata", {}).get("title", ""),
-        "description": data.get("metadata", {}).get("description", ""),
-        "language": data.get("metadata", {}).get("language", ""),
-    }
-    if req.extract_schema:
-        metadata["schema"] = data.get("schemaOrg", [])
-    
-    # Chunk text
-    chunks = chunk_text(text, req.chunk_size)
-    
-    result = ScrapeResponse(url=url_str, chunks=chunks, metadata=metadata)
+    # Build response
+    result = ScrapeResponse(
+        url=url_str,
+        text=data.get("text", ""),
+        highlights=data.get("highlights"),
+        title=data.get("title"),
+        metadata={"provider": "exa"},
+    )
     
     # Cache result
     cache[cache_key] = {"data": result.model_dump(), "ts": time.time()}
     
     return result
+
+
+@app.post("/scrape/chunks")
+async def scrape_chunks(req: ScrapeRequest, chunk_size: int = Query(1000, ge=100, le=10000)):
+    """Scrape website and return as chunks for LLM consumption."""
+    # First get full scrape
+    scrape_result = await scrape(req)
+    
+    # Chunk the text
+    chunks = chunk_text(scrape_result.text, chunk_size)
+    
+    return {
+        "url": scrape_result.url,
+        "title": scrape_result.title,
+        "chunks": chunks,
+        "chunk_count": len(chunks),
+        "metadata": scrape_result.metadata,
+    }
 
 
 if __name__ == "__main__":
