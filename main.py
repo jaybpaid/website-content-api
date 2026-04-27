@@ -1,166 +1,171 @@
 """
-FastAPI wrapper around Exa Search API for website content extraction.
-Provides LLM-ready chunks, highlights, and text content.
+Website Content API - Reliable web scraping using Exa
+Simple, fast, affordable - LLM-ready output for AI applications.
 """
 import os
-import json
-import hashlib
-import time
-from typing import Optional, Union, List
+from typing import Optional, List
+from datetime import datetime
 
-from exa_py import Exa
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, HttpUrl
-
-# Load environment variables
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-load_dotenv()
 
-EXA_API_KEY = os.getenv("EXA_API_KEY")  # Must be set in environment
+load_dotenv()
 
 app = FastAPI(
     title="Website Content API",
-    description="LLM-ready content extraction API using Exa Search API",
-    version="0.2.0",
+    description="Fast, reliable web scraping with LLM-ready output",
+    version="2.0.0",
 )
 
-# Initialize Exa client
-exa = Exa(EXA_API_KEY) if EXA_API_KEY else None
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Simple in-memory cache (for production replace with Redis)
-cache = {}
-
-
+# Models
 class ScrapeRequest(BaseModel):
-    url: HttpUrl
-    highlights: Optional[bool] = True
-    max_chars: Optional[int] = 5000  # max characters per result
+    url: str = Field(..., description="URL to scrape")
+    highlights: bool = Field(default=True, description="Return highlights")
+    text: bool = Field(default=True, description="Return full text")
 
+class SearchRequest(BaseModel):
+    query: str = Field(..., description="Search query")
+    num_results: int = Field(default=10, description="Number of results")
 
-class ScrapeResponse(BaseModel):
-    url: str
-    text: str
-    highlights: Optional[str] = None
-    title: Optional[str] = None
-    metadata: dict
+# Storage for jobs
+jobs = {}
 
-
-def get_cache_key(url: str) -> str:
-    return hashlib.md5(url.encode()).hexdigest()
-
-
-def _convert_highlights(h) -> Optional[str]:
-    """Convert highlights from Exa API which can be list or string."""
-    if h is None:
-        return None
-    if isinstance(h, list):
-        return "\n".join(str(x) for x in h)
-    return str(h)
-
-
-async def scrape_with_exa(url: str, max_chars: int = 5000) -> dict:
-    """Scrape website content using Exa API."""
-    if not exa:
+def get_exa():
+    """Get Exa client with API key."""
+    exa_key = os.getenv("EXA_API_KEY", "")
+    if not exa_key:
         raise HTTPException(status_code=500, detail="EXA_API_KEY not configured")
-    
-    # Get full text content from URL
-    result = exa.get_contents(
-        [str(url)],
-        text=True,
-        summary=False,
-        highlights={"max_characters": max_chars} if max_chars else None,
-    )
-    
-    if not result or not result.results:
-        raise HTTPException(status_code=404, detail="No content found")
-    
-    item = result.results[0]
-    return {
-        "text": item.text or "",
-        "url": item.url,
-        "title": item.title,
-        "highlights": item.highlights,
-    }
-
-
-def chunk_text(text: str, size: int = 1000) -> list[str]:
-    """Split text into chunks of approx size."""
-    if not text:
-        return []
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + size
-        chunks.append(text[start:end])
-        start = end
-    return chunks
-
+    from exa_py import Exa
+    return Exa(exa_key)
 
 @app.get("/")
 async def root():
-    return {"message": "Website Content API", "version": "0.2.0", "docs": "/docs"}
-
+    return {
+        "service": "Website Content API",
+        "version": "2.0.0",
+        "status": "active",
+        "docs": "/docs",
+    }
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "provider": "exa"}
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-
-@app.post("/scrape", response_model=ScrapeResponse)
-async def scrape(req: ScrapeRequest):
-    url_str = str(req.url)
-    
-    # Check cache first
-    cache_key = get_cache_key(url_str)
-    if cache_key in cache:
-        cached = cache[cache_key]
-        # Simple 5-min TTL
-        if time.time() - cached["ts"] < 300:
-            return cached["data"]
-    
-    # Call Exa API
+@app.post("/scrape")
+async def scrape(request: ScrapeRequest):
+    """Scrape a URL and return clean, LLM-ready content."""
     try:
-        data = await scrape_with_exa(url_str, req.max_chars)
+        exa = get_exa()
+        
+        # Build contents options
+        contents = {"text": {"maxCharacters": 50000}}
+        if request.highlights:
+            contents["highlights"] = True
+        
+        # Search for this specific URL
+        result = exa.search(
+            f"site:{request.url.replace('https://', '').replace('http://', '')}",
+            num_results=1,
+            contents=contents,
+        )
+        
+        if not result or not result.results:
+            raise HTTPException(status_code=404, detail="No content found")
+        
+        r = result.results[0]
+        
+        return {
+            "success": True,
+            "url": request.url,
+            "title": r.title if hasattr(r, 'title') else "",
+            "text": r.text if hasattr(r, 'text') else "",
+            "highlights": getattr(r, 'highlights', []) or [],
+        }
+        
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-    # Build response - convert highlights from list if needed
-    highlights_val = _convert_highlights(data.get("highlights"))
-    
-    result = ScrapeResponse(
-        url=url_str,
-        text=data.get("text", ""),
-        highlights=highlights_val,
-        title=data.get("title"),
-        metadata={"provider": "exa"},
-    )
-    
-    # Cache result
-    cache[cache_key] = {"data": result.model_dump(), "ts": time.time()}
-    
-    return result
 
+@app.post("/scrape/urls")
+async def scrape_urls(urls: List[str], highlights: bool = True):
+    """Scrape multiple URLs at once."""
+    try:
+        exa = get_exa()
+        
+        contents = {"text": {"maxCharacters": 50000}}
+        if highlights:
+            contents["highlights"] = True
+        
+        # Build OR query for all URLs
+        queries = [f"site:{u.replace('https://', '').replace('http://', '')}" for u in urls]
+        query = " OR ".join(queries)
+        
+        result = exa.search(query, num_results=len(urls), contents=contents)
+        
+        results = []
+        for r in (result.results or []):
+            results.append({
+                "url": r.url,
+                "title": r.title if hasattr(r, 'title') else "",
+                "text": r.text[:2000] if hasattr(r, 'text') else "",  # Truncate for batch
+                "highlights": getattr(r, 'highlights', []) or [],
+            })
+        
+        return {
+            "count": len(results),
+            "results": results,
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/scrape/chunks")
-async def scrape_chunks(req: ScrapeRequest, chunk_size: int = 1000):
-    """Scrape website and return as chunks for LLM consumption."""
-    # First get full scrape
-    scrape_result = await scrape(req)
-    
-    # Chunk the text
-    chunks = chunk_text(scrape_result.text, chunk_size)
-    
-    return {
-        "url": scrape_result.url,
-        "title": scrape_result.title,
-        "chunks": chunks,
-        "chunk_count": len(chunks),
-        "metadata": scrape_result.metadata,
-    }
+@app.post("/search")
+async def search(request: SearchRequest):
+    """Search the web and return results with content."""
+    try:
+        exa = get_exa()
+        
+        result = exa.search(
+            request.query,
+            num_results=request.num_results,
+            contents={"text": True, "highlights": True},
+        )
+        
+        results = []
+        for r in (result.results or []):
+            results.append({
+                "title": r.title if hasattr(r, 'title') else "",
+                "url": r.url if hasattr(r, 'url') else "",
+                "text": r.text[:1000] if hasattr(r, 'text') else "",
+                "published": getattr(r, 'published', None),
+            })
+        
+        return {
+            "query": request.query,
+            "count": len(results),
+            "results": results,
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return jobs[job_id]
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
